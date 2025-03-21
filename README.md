@@ -66,7 +66,7 @@ int main() {
     // 添加中间件
     PebbleLog::middleware()
         | MiddleWare::LocalTimeStampMiddleware("%Y-%m-%d %H:%M:%S")
-        | MiddleWare::FileNa mePrefixMiddleware("DEBUG_")
+        | MiddleWare::FileNamePrefixMiddleware("DEBUG_")
         | MiddleWare::ConsolePrefixMiddleware("[cmx]");
 
     // 应用中间件

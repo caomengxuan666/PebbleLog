@@ -131,7 +131,7 @@ PebbleLog 支持基于文件大小的日志轮转功能。当日志文件达到�
 
 ## 贡献
 
-欢迎为 PebbleLog 贡献代码！如果您发现了问题或希望添加新功能，请提交 [Issue](https://github.com/your-repo/PebbleLog/issues) 或 [Pull Request](https://github.com/your-repo/PebbleLog/pulls)。
+欢迎为 PebbleLog 贡献代码！如果您发现了问题或希望添加新功能，请提交 [Issue](https://github.com/caomengxuan666/PebbleLog/issues) 或 [Pull Request](https://github.com/caomengxuan666/PebbleLog/pulls)。
 
 ---
 

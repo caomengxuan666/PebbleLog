@@ -1,3 +1,4 @@
+/*
 #include "PebbleLog.h"
 #include <cstdio>
 #include <cstring>
@@ -10,6 +11,7 @@
 #include <windows.h>
 #undef ERROR// 取消宏定义
 #else
+#include <iostream>
 #include <unistd.h>
 #endif
 
@@ -253,3 +255,4 @@ namespace utils::Log {
         }
     }
 }// namespace utils::Log
+*/

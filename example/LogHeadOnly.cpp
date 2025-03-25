@@ -1,4 +1,5 @@
 #include "../PebbleLog_ho.hpp"
+#include <thread>
 
 void logMessages() {
     using namespace utils::Log;
@@ -50,7 +51,9 @@ int main() {
     std::vector<std::thread> threads;
     for (int i = 0; i < 5; ++i) {
         threads.emplace_back(logMessages);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+    
 
     // 等待所有线程完成
     for (auto &thread: threads) {

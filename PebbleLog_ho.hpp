@@ -3,15 +3,83 @@
  * @brief header_only file for pebble log
  */
 
-#include <memory>
-#include <vector>
 #include <atomic>
 #include <condition_variable>
 #include <format>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <sstream>
 #include <thread>
+#include <vector>
+
+#ifndef WIN32
+#include <iostream>
+#endif// !WIN32
+
+#include <functional>
+#include <future>
+
+class ThreadPool {
+public:
+    ThreadPool(size_t threads) {
+        // 使用 std::jthread 替代 std::thread，自动管理生命周期
+        for (size_t i = 0; i < threads; ++i) {
+            workers.emplace_back([this] { worker(); });
+        }
+    }
+
+    ~ThreadPool() {
+        // 安全停止所有线程
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            stop = true;
+        }
+        condition.notify_all();
+        for (std::jthread &worker: workers) {
+            if (worker.joinable()) worker.join();// std::jthread 会自动处理 join
+        }
+    }
+
+    // 提交任务到线程池
+    template<class F, class... Args>
+    auto enqueue(F &&f, Args &&...args) -> std::future<typename std::result_of<F(Args...)>::type> {
+        using return_type = typename std::result_of<F(Args...)>::type;
+
+        auto task = std::make_shared<std::packaged_task<return_type()>>(
+                std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            if (stop) throw std::runtime_error("enqueue on stopped ThreadPool");
+            tasks.emplace([task]() { (*task)(); });
+        }
+        condition.notify_one();
+        return res;
+    }
+
+private:
+    void worker() {
+        while (true) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                condition.wait(lock, [this] { return stop || !tasks.empty(); });
+                if (stop && tasks.empty()) return;// 线程退出
+                task = std::move(tasks.front());
+                tasks.pop();
+            }
+            task();
+        }
+    }
+
+    std::vector<std::jthread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queue_mutex;
+    std::condition_variable condition;
+    bool stop = false;
+};
 
 namespace utils::Log::MiddleWare {
     class MiddlewareBase {
@@ -229,9 +297,11 @@ namespace utils::Log {
         static std::condition_variable queueCond;
         std::atomic<bool> stopFlag;
         std::thread logThread;
+        ThreadPool threadPool;
 
         void processLogs();
     };
+
 }// namespace utils::Log
 
 #define PEBBLETRACE(func, ...) \
@@ -239,7 +309,6 @@ namespace utils::Log {
 
 #include <chrono>
 #include <ctime>
-#include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <type_traits>
@@ -247,7 +316,7 @@ namespace utils::Log {
 namespace utils::Log::MiddleWare {
 
     // 使用 chrono 获取本地时间并格式化为字符串
-    std::string getLocalTimeString(const std::string &format = "%Y-%m-%d %H:%M:%S") {
+    inline std::string getLocalTimeString(const std::string &format = "%Y-%m-%d %H:%M:%S") {
         // 获取当前时间点
         auto now = std::chrono::system_clock::now();
         // 转换为 time_t
@@ -271,7 +340,7 @@ namespace utils::Log::MiddleWare {
         LocalTimeStampMiddleware() : formatStr("%Y-%m-%d %H:%M:%S") {}
 
         template<typename T>
-            requires std::is_constructible_v<std::string, T>// 编译期约束：确保参数可转换为 std::string
+            requires std::is_constructible_v<std::string, T>
         LocalTimeStampMiddleware(T &&format) : formatStr(std::forward<T>(format)) {
             static_assert(!std::is_same_v<std::decay_t<T>, std::string> || !formatStr.empty(),
                           "Time format string must not be empty.");
@@ -280,14 +349,24 @@ namespace utils::Log::MiddleWare {
         }
 
         void process() {
+            // 缓存当前时间戳，避免重复计算
+            auto currentTime = std::time(nullptr);
             std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
-            std::string timeStr = getLocalTimeString(formatStr);
-            PebbleLog::setLogName(PebbleLog::getLogName() + "[" + timeStr + "]");
+            // 如果时间戳未初始化或跨越秒级时间边界，则更新时间戳
+            if (!timeStrInitialized || std::difftime(currentTime, lastUpdateTime) >= 1) {
+                timeStr = getLocalTimeString(formatStr);
+                timeStrInitialized = true;
+                lastUpdateTime = currentTime;// 更新最后更新时间
+            }
+            PebbleLog::setLogName(std::move(PebbleLog::getLogName() + "[" + timeStr + "]"));
             PebbleLog::setTimeFormat(formatStr);
         }
 
     private:
         std::string formatStr;
+        std::string timeStr;
+        bool timeStrInitialized = false;// 标记时间戳是否已初始化
+        std::time_t lastUpdateTime = 0; // 记录上次更新时间戳的时间
     };
 
     class DailyLogMiddleware : public LoggerMiddleware<DailyLogMiddleware> {
@@ -377,15 +456,15 @@ namespace utils::Log {
     };// namespace defalut
 
     // 初始化静态成员
-    PebbleLog::LogProperty PebbleLog::logProperty;
-    std::mutex PebbleLog::logMutex;
-    std::queue<std::pair<LogLevel, std::string>> PebbleLog::logQueue;// 定义静态成员变量 logQueue
-    std::mutex PebbleLog::queueMutex;                                // 定义静态成员变量
-    std::condition_variable PebbleLog::queueCond;                    // 定义静态成员变量
+    inline PebbleLog::LogProperty PebbleLog::logProperty;
+    inline std::mutex PebbleLog::logMutex;
+    inline std::queue<std::pair<LogLevel, std::string>> PebbleLog::logQueue;// 定义静态成员变量 logQueue
+    inline std::mutex PebbleLog::queueMutex;                                // 定义静态成员变量
+    inline std::condition_variable PebbleLog::queueCond;                    // 定义静态成员变量
     static bool skipDebug = false;
 
     // 在 PebbleLog 构造函数中初始化控制台模式
-    PebbleLog::PebbleLog() : stopFlag(false) {
+    inline PebbleLog::PebbleLog() : stopFlag(false), threadPool(std::thread::hardware_concurrency()) {
 #ifdef _WIN32
         // 启用虚拟终端支持
         HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -398,7 +477,7 @@ namespace utils::Log {
         logThread = std::thread(&PebbleLog::processLogs, this);
     }
 
-    PebbleLog::~PebbleLog() {
+    inline PebbleLog::~PebbleLog() {
         stopFlag = true;
         queueCond.notify_all();
         if (logThread.joinable()) {
@@ -406,65 +485,67 @@ namespace utils::Log {
         }
     }
 
-    void PebbleLog::processLogs() {
-        while (!stopFlag) {
+    inline void PebbleLog::processLogs() {
+        while (!stopFlag.load()) {
             std::unique_lock<std::mutex> lock(queueMutex);
-            queueCond.wait(lock, [this] { return !logQueue.empty() || stopFlag; });
+            queueCond.wait(lock, [this] { return !logQueue.empty() || stopFlag.load(); });
 
             while (!logQueue.empty()) {
                 auto entry = logQueue.front();
                 logQueue.pop();
-                lock.unlock();
+                lock.unlock();// 解锁后立即释放锁
 
-                if (logProperty.type == LogType::CONSOLE) {
-                    writeLogToConsole(entry.first, entry.second);
-                } else if (logProperty.type == LogType::FILE) {
-                    writeLogToFile(entry.second);
-                } else {
-                    writeLogToConsole(entry.first, entry.second);
-                    writeLogToFile(entry.second);
-                }
+                // 异步提交到线程池
+                threadPool.enqueue([entry = std::move(entry)]  {
+                    if (logProperty.type == LogType::CONSOLE || logProperty.type == LogType::BOTH) {
+                        writeLogToConsole(entry.first, entry.second);
+                    }
+                    if (logProperty.type == LogType::FILE || logProperty.type == LogType::BOTH) {
+                        writeLogToFile(entry.second);
+                    }
+                });
 
-                lock.lock();
+                lock.lock();// 重新加锁继续处理队列
             }
         }
     }
 
     // 配置方法
-    void PebbleLog::setLogLevel(LogLevel level) { logProperty.level = level; }
-    void PebbleLog::setLogType(LogType type) { logProperty.type = type; }
-    void PebbleLog::setMaxFileSize(size_t size) { logProperty.maxFileSize = size; }
-    void PebbleLog::setMaxFileCount(size_t count) { logProperty.maxFileCount = count; }
-    void PebbleLog::setLogPath(const std::string &path) { logProperty.logPath = path; }
-    void PebbleLog::setLogName(const std::string &name) { logProperty.logName = name; }
+    inline void PebbleLog::setLogLevel(LogLevel level) { logProperty.level = level; }
+    inline void PebbleLog::setLogType(LogType type) { logProperty.type = type; }
+    inline void PebbleLog::setMaxFileSize(size_t size) { logProperty.maxFileSize = size; }
+    inline void PebbleLog::setMaxFileCount(size_t count) { logProperty.maxFileCount = count; }
+    inline void PebbleLog::setLogPath(const std::string &path) { logProperty.logPath = path; }
+    inline void PebbleLog::setLogName(const std::string &name) { logProperty.logName = name; }
 
-    void PebbleLog::setTimeFormat(const std::string &format) { defalut::timeFormat = format; }
+    inline void PebbleLog::setTimeFormat(const std::string &format) { defalut::timeFormat = format; }
 
-    void PebbleLog::setConsolePrefixFormat(const std::string &format) { defalut::filePrefixFormat = format; }
+    inline void PebbleLog::setConsolePrefixFormat(const std::string &format) { defalut::filePrefixFormat = format; }
 
-    void PebbleLog::setFilePrefixFormat(const std::string &format) {
+    inline void PebbleLog::setFilePrefixFormat(const std::string &format) {
         defalut::filePrefixFormat = format;
     }
 
-    const std::string &PebbleLog::getLogName() { return logProperty.logName; }
+    inline const std::string &PebbleLog::getLogName() { return logProperty.logName; }
 
-    const std::string &PebbleLog::getConsolePrefixFormat() {
+    inline const std::string &PebbleLog::getConsolePrefixFormat() {
         return defalut::filePrefixFormat;
     }
 
     // 核心日志方法
-    void PebbleLog::log(LogLevel level, std::string_view message) {
+    inline void PebbleLog::log(LogLevel level, std::string_view message) {
         if (level < logProperty.level) return;
-
+    
         std::string formattedMessage;
         formatLogMessage(level, std::string(message), formattedMessage);
-
+    
         std::lock_guard<std::mutex> lock(getInstance().queueMutex);
-        getInstance().logQueue.push({level, formattedMessage});
+        // 使用 emplace 替代 push，避免不必要的拷贝
+        logQueue.emplace(level, std::move(formattedMessage)); // 直接构造 pair
         getInstance().queueCond.notify_one();
     }
 
-    void PebbleLog::formatLogMessage(LogLevel level, const std::string &message, std::string &formattedMessage) {
+    inline void PebbleLog::formatLogMessage(LogLevel level, const std::string &message, std::string &formattedMessage) {
         auto now = std::time(nullptr);
         auto tm = *std::localtime(&now);
 
@@ -486,7 +567,7 @@ namespace utils::Log {
     }
 
 #ifdef _WIN32
-    void PebbleLog::writeLogToConsole(LogLevel level, const std::string &message) {
+    inline void PebbleLog::writeLogToConsole(LogLevel level, const std::string &message) {
         static HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
         if (hConsole == INVALID_HANDLE_VALUE) return;
 
@@ -527,7 +608,7 @@ namespace utils::Log {
 #endif
 
 #ifndef _WIN32
-    void PebbleLog::writeLogToConsole(LogLevel level, const std::string &message) {
+    inline void PebbleLog::writeLogToConsole(LogLevel level, const std::string &message) {
         // 使用 ANSI 转义序列
         const char *colorCode = "";
         switch (level) {
@@ -560,12 +641,13 @@ namespace utils::Log {
         if (result == -1) {
             // 备用方案：使用 cerr（避免递归调用）
             std::cerr << "Console write failed: " << strerror(errno) << std::endl;
+            //直接在linux输出
         }
     }
 #endif
 
     // 输出到文件（支持轮转）
-    void PebbleLog::writeLogToFile(const std::string &message) {
+    inline void PebbleLog::writeLogToFile(const std::string &message) {
         std::filesystem::create_directories(logProperty.logPath);
         std::string fullPath = logProperty.logPath + "/" + logProperty.logName;
 

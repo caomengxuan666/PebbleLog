@@ -1,3 +1,4 @@
+/*
 #pragma once
 
 #ifdef _WIN32
@@ -209,3 +210,5 @@ namespace utils::Log {
 #define PEBBLETRACE(func, ...) \
     PebbleLog::traceFunction(__FILE__, __LINE__, __func__, func, ##__VA_ARGS__); \
 
+
+    */

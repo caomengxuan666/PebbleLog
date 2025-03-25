@@ -1,31 +1,52 @@
 #pragma once
-#include "PebbleLog.h"
 #include "MiddleWare.hpp"
+#include "PebbleLog.h"
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <mutex>
+#include <sstream>
 #include <type_traits>
 
 namespace utils::Log::MiddleWare {
+
+    // 使用 chrono 获取本地时间并格式化为字符串
+    std::string getLocalTimeString(const std::string &format = "%Y-%m-%d %H:%M:%S") {
+        // 获取当前时间点
+        auto now = std::chrono::system_clock::now();
+        // 转换为 time_t
+        std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+        // 转换为本地时间
+        std::tm localTime;
+#ifdef _WIN32
+        localtime_s(&localTime, &now_time_t);// Windows 使用 localtime_s
+#else
+        localtime_r(&now_time_t, &localTime);// Linux 使用 localtime_r
+#endif
+
+        // 格式化时间
+        char timeStr[20];
+        std::strftime(timeStr, sizeof(timeStr), format.c_str(), &localTime);
+        return std::string(timeStr);
+    }
 
     class LocalTimeStampMiddleware : public LoggerMiddleware<LocalTimeStampMiddleware> {
     public:
         LocalTimeStampMiddleware() : formatStr("%Y-%m-%d %H:%M:%S") {}
 
-        template <typename T>
-        requires std::is_constructible_v<std::string, T> // 编译期约束：确保参数可转换为 std::string
-        LocalTimeStampMiddleware(T&& format) : formatStr(std::forward<T>(format)) {
-            static_assert(!std::is_same_v<std::decay_t<T>, std::string> || !formatStr.empty(), 
+        template<typename T>
+            requires std::is_constructible_v<std::string, T>// 编译期约束：确保参数可转换为 std::string
+        LocalTimeStampMiddleware(T &&format) : formatStr(std::forward<T>(format)) {
+            static_assert(!std::is_same_v<std::decay_t<T>, std::string> || !formatStr.empty(),
                           "Time format string must not be empty.");
-            static_assert(std::is_constructible_v<std::string, T>, 
+            static_assert(std::is_constructible_v<std::string, T>,
                           "Template parameter must be convertible to std::string.");
         }
 
         void process() {
             std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
-            std::time_t now = std::time(nullptr);
-            std::tm localTime;
-            localtime_r(&now, &localTime);
-            char timeStr[20];
-            std::strftime(timeStr, sizeof(timeStr), formatStr.c_str(), &localTime);
-            PebbleLog::setLogName(PebbleLog::getLogName() + "[" + std::string(timeStr) + "]");
+            std::string timeStr = getLocalTimeString(formatStr);
+            PebbleLog::setLogName(PebbleLog::getLogName() + "[" + timeStr + "]");
             PebbleLog::setTimeFormat(formatStr);
         }
 
@@ -33,61 +54,13 @@ namespace utils::Log::MiddleWare {
         std::string formatStr;
     };
 
-    class FileNamePrefixMiddleware : public LoggerMiddleware<FileNamePrefixMiddleware> {
+    class DailyLogMiddleware : public LoggerMiddleware<DailyLogMiddleware> {
     public:
-        FileNamePrefixMiddleware() : prefix("PREFIX_") {}
-
-        template <typename T>
-        requires std::is_constructible_v<std::string, T> // 编译期约束：确保参数可转换为 std::string
-        FileNamePrefixMiddleware(T&& customPrefix) : prefix(std::forward<T>(customPrefix)) {
-            static_assert(!std::is_same_v<std::decay_t<T>, std::string> || !prefix.empty(), 
-                          "File name prefix must not be empty.");
-            static_assert(std::is_constructible_v<std::string, T>, 
-                          "Template parameter must be convertible to std::string.");
-        }
+        DailyLogMiddleware() {}
 
         void process() {
             std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
-            PebbleLog::setLogName(prefix + PebbleLog::getLogName());
-        }
-
-    private:
-        std::string prefix;
-    };
-
-    class ConsolePrefixMiddleware : public LoggerMiddleware<ConsolePrefixMiddleware> {
-    public:
-        ConsolePrefixMiddleware() : prefix() {}
-
-        template <typename T>
-        requires std::is_constructible_v<std::string, T> // 编译期约束：确保参数可转换为 std::string
-        ConsolePrefixMiddleware(T&& customPrefix) : prefix(std::forward<T>(customPrefix)) {
-            static_assert(!std::is_same_v<std::decay_t<T>, std::string> || !prefix.empty(), 
-                          "Console prefix must not be empty.");
-            static_assert(std::is_constructible_v<std::string, T>, 
-                          "Template parameter must be convertible to std::string.");
-        }
-
-        void process() {
-            std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
-            PebbleLog::setConsolePrefixFormat(prefix);
-        }
-
-    private:
-        std::string prefix;
-    };
-
-    class DailyLogMiddleware:public LoggerMiddleware<DailyLogMiddleware>{
-        public:
-        DailyLogMiddleware(){}
-
-        void process(){
-            std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
-            std::time_t now = std::time(nullptr);
-            std::tm localTime;
-            localtime_r(&now, &localTime);
-            char dateStr[11]; // 格式为 YYYY-MM-DD
-            std::strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &localTime);
+            std::string dateStr = getLocalTimeString("%Y-%m-%d");
             std::string logName = PebbleLog::getLogName();
             size_t dotPos = logName.find_last_of('.');
             if (dotPos != std::string::npos) {
@@ -101,24 +74,24 @@ namespace utils::Log::MiddleWare {
         }
     };
 
-class TraceMiddleware : public LoggerMiddleware<TraceMiddleware> {
-public:
-    TraceMiddleware(const std::string& file, int line, const std::string& func, const std::string& args)
-        : file(file), line(line), func(func), args(args) {}
+    class TraceMiddleware : public LoggerMiddleware<TraceMiddleware> {
+    public:
+        TraceMiddleware(const std::string &file, int line, const std::string &func, const std::string &args)
+            : file(file), line(line), func(func), args(args) {}
 
-    void process() {
-        std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
-        std::stringstream ss;
-        ss << "[Trace] File: " << file << ", Line: " << line << ", Function: " << func << ", Args: " << args;
-        PebbleLog::info(ss.str());
-    }
+        void process() {
+            std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
+            std::stringstream ss;
+            ss << "[Trace] File: " << file << ", Line: " << line << ", Function: " << func << ", Args: " << args;
+            PebbleLog::info(ss.str());// 使用日志库输出
+        }
 
-private:
-    std::string file;
-    int line;
-    std::string func;
-    std::string args;
-};
+    private:
+        std::string file;
+        int line;
+        std::string func;
+        std::string args;
+    };
 
     class ThreadIDMiddleware : public LoggerMiddleware<ThreadIDMiddleware> {
     public:
@@ -134,7 +107,7 @@ private:
 
     class CustomTagMiddleware : public LoggerMiddleware<CustomTagMiddleware> {
     public:
-        CustomTagMiddleware(const std::string& tag) : tag(tag) {}
+        CustomTagMiddleware(const std::string &tag) : tag(tag) {}
 
         void process() {
             std::lock_guard<std::mutex> lock(PebbleLog::getMutex());
@@ -144,4 +117,4 @@ private:
     private:
         std::string tag;
     };
-} // namespace utils::Log::MiddleWare
+}// namespace utils::Log::MiddleWare

@@ -34,22 +34,16 @@ void pointerExample() {
     delete ptr;
 }
 
-
-
 int main() {
-    using namespace utils::Log;
+    using namespace utils::Log::MiddleWare;
 
     // 配置日志
     PebbleLog::setLogLevel(LogLevel::DEBUG);
     PebbleLog::setLogType(LogType::BOTH);
     PebbleLog::setLogPath("./custom_logs");
     PebbleLog::setLogName("app.log");
-
     // 添加中间件（直接传递实例）
-    PebbleLog::middleware()
-        | MiddleWare::LocalTimeStampMiddleware("%Y-%m-%d %H:%M:%S")  
-        | MiddleWare::FileNamePrefixMiddleware("DEBUG_")        
-        | MiddleWare::ConsolePrefixMiddleware("[LogExample]");               
+    PebbleLog::middleware() | MiddleWare::LocalTimeStampMiddleware("%Y-%m-%d %H:%M:%S");           
 
     // 应用中间件
     PebbleLog::applyMiddlewares();
@@ -64,6 +58,7 @@ int main() {
     for (auto& thread : threads) {
         thread.join();
     }
+
 
     exampleFunction(10, 20);
 

@@ -1,5 +1,15 @@
 #pragma once
 
+#ifdef _WIN32
+#ifdef PEBBLE_LOG_EXPORTS
+#define PEBBLE_LOG_API __declspec(dllexport)
+#else
+#define PEBBLE_LOG_API __declspec(dllimport)
+#endif
+#else
+#define PEBBLE_LOG_API// 非 Windows 平台无需特殊处理
+#endif
+
 #include "MiddleWare.hpp"
 #include <atomic>
 #include <condition_variable>
@@ -11,6 +21,7 @@
 using namespace utils::Log;
 namespace utils::Log {
     using namespace Log::MiddleWare;
+
     enum class LogLevel {
         DEBUG,
         INFO,

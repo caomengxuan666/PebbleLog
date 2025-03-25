@@ -5,8 +5,13 @@
 #include <fcntl.h>// 用于 open
 #include <filesystem>
 #include <fstream>
-#include <iostream>
-#include <unistd.h>// 用于系统调用
+#ifdef _WIN32
+#include <io.h>// for _open, _close
+#include <windows.h>
+#undef ERROR// 取消宏定义
+#else
+#include <unistd.h>
+#endif
 
 namespace utils::Log {
     namespace defalut {
@@ -23,8 +28,17 @@ namespace utils::Log {
     std::condition_variable PebbleLog::queueCond;                    // 定义静态成员变量
     static bool skipDebug = false;
 
-
+// 在 PebbleLog 构造函数中初始化控制台模式
     PebbleLog::PebbleLog() : stopFlag(false) {
+#ifdef _WIN32
+        // 启用虚拟终端支持
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD dwMode = 0;
+        if (GetConsoleMode(hOut, &dwMode)) {
+            dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            SetConsoleMode(hOut, dwMode);
+        }
+#endif
         logThread = std::thread(&PebbleLog::processLogs, this);
     }
 
@@ -115,39 +129,84 @@ namespace utils::Log {
                                    } }(), message);
     }
 
-    // 输出到控制台
+#ifdef _WIN32
     void PebbleLog::writeLogToConsole(LogLevel level, const std::string &message) {
+        static HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (hConsole == INVALID_HANDLE_VALUE) return;
+
+        // 设置颜色
+        WORD colorCode = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;// 默认白色
+        switch (level) {
+            case LogLevel::INFO:
+                colorCode = FOREGROUND_GREEN;
+                break;
+            case LogLevel::DEBUG:
+                colorCode = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+                break;
+            case LogLevel::WARN:
+                colorCode = FOREGROUND_RED | FOREGROUND_GREEN;
+                break;// 黄色
+            case LogLevel::ERROR:
+                colorCode = FOREGROUND_RED;
+                break;
+            case LogLevel::FATAL:
+                colorCode = FOREGROUND_RED | FOREGROUND_BLUE;
+                break;// 洋红
+            case LogLevel::TRACE:
+                colorCode = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+                break;
+            default:
+                break;
+        }
+        SetConsoleTextAttribute(hConsole, colorCode);
+
+        // 写入消息
+        DWORD written;
+        WriteConsoleA(hConsole, message.c_str(), static_cast<DWORD>(message.size()), &written, nullptr);
+        WriteConsoleA(hConsole, "\n", 1, &written, nullptr);// 换行符
+
+        // 恢复默认颜色
+        SetConsoleTextAttribute(hConsole, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
+    }
+#endif
+
+    #ifndef _WIN32
+    void PebbleLog::writeLogToConsole(LogLevel level, const std::string &message) {
+        // 使用 ANSI 转义序列
         const char *colorCode = "";
         switch (level) {
             case LogLevel::INFO:
-                colorCode = "\033[32m";// 绿色
+                colorCode = "\033[32m";
                 break;
             case LogLevel::DEBUG:
-                colorCode = "\033[36m";// 青色
+                colorCode = "\033[36m";
                 break;
             case LogLevel::WARN:
-                colorCode = "\033[33m";// 黄色
+                colorCode = "\033[33m";
                 break;
             case LogLevel::ERROR:
-                colorCode = "\033[31m";// 红色
+                colorCode = "\033[31m";
                 break;
             case LogLevel::FATAL:
-                colorCode = "\033[35m";// 洋红色
+                colorCode = "\033[35m";
                 break;
             case LogLevel::TRACE:
-                colorCode = "\033[34m";// 蓝色
+                colorCode = "\033[34m";
                 break;
             default:
-                colorCode = "\033[0m";// 默认颜色
+                colorCode = "\033[0m";
                 break;
         }
 
-        std::string coloredMessage = colorCode + message + "\033[0m\n";// 确保每条日志消息都带有换行符
-        ssize_t result = write(STDOUT_FILENO, coloredMessage.c_str(), coloredMessage.size());
+        // 系统调用
+        std::string output = colorCode + message + "\033[0m\n";
+        ssize_t result = write(STDOUT_FILENO, output.c_str(), output.size());
         if (result == -1) {
-            std::cerr << "Failed to write to console: " << strerror(errno) << std::endl;
+            // 备用方案：使用 cerr（避免递归调用）
+            std::cerr << "Console write failed: " << strerror(errno) << std::endl;
         }
     }
+#endif
 
     // 输出到文件（支持轮转）
     void PebbleLog::writeLogToFile(const std::string &message) {
@@ -166,9 +225,9 @@ namespace utils::Log {
                     try {
                         std::filesystem::rename(oldName, newName);
                     } catch (const std::filesystem::filesystem_error &e) {
-                        std::cerr << "Filesystem error: " << e.what() << std::endl;
+                        error("Filesystem error: " + std::string(e.what()));
                     } catch (const std::exception &e) {
-                        std::cerr << "General error: " << e.what() << std::endl;
+                        error("General error: " + std::string(e.what()));
                     }
                 }
             }
@@ -178,9 +237,9 @@ namespace utils::Log {
                 try {
                     std::filesystem::rename(fullPath, newName);
                 } catch (const std::filesystem::filesystem_error &e) {
-                    std::cerr << "Filesystem error: " << e.what() << std::endl;
+                    error("Filesystem error: " + std::string(e.what()));
                 } catch (const std::exception &e) {
-                    std::cerr << "General error: " << e.what() << std::endl;
+                    error("General error: " + std::string(e.what()));
                 }
             }
         }
@@ -190,7 +249,7 @@ namespace utils::Log {
             outFile << message << std::endl;
             outFile.close();
         } else {
-            std::cerr << "Failed to open log file: " << fullPath << std::endl;
+            error("Failed to open log file: " + fullPath);
         }
     }
 }// namespace utils::Log
